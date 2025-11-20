@@ -1,0 +1,7 @@
+{
+  "name": "Gemini AI Chat",
+  "description": "A powerful, multimodal AI chat interface powered by Google Gemini 2.5 models.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
