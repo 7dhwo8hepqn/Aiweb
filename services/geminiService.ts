@@ -1,7 +1,14 @@
 import { GoogleGenAI, Content, Part } from "@google/genai";
 import { Message } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Helper to get client safely
+const getGenAIClient = () => {
+  const apiKey = process.env.API_KEY;
+  if (!apiKey || apiKey.includes("YOUR_API_KEY")) {
+    throw new Error("API Key not found. Please check your Vercel Environment Variables.");
+  }
+  return new GoogleGenAI({ apiKey });
+};
 
 /**
  * Helper to convert File object to Base64 string
@@ -30,6 +37,7 @@ export const generateImageCaption = async (
   model: string
 ): Promise<string> => {
   try {
+    const ai = getGenAIClient();
     const response = await ai.models.generateContent({
       model: model,
       contents: {
@@ -61,6 +69,8 @@ export const streamChatResponse = async (
   systemInstruction?: string
 ) => {
   
+  const ai = getGenAIClient();
+
   // Transform app history to Gemini Content format
   const contents: Content[] = history
     .filter(msg => !msg.isError && !msg.isStreaming) // Filter out UI states
