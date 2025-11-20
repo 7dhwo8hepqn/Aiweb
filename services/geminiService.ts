@@ -3,9 +3,12 @@ import { Message } from "../types";
 
 // Helper to get client safely
 const getGenAIClient = () => {
+  // Access the key that was injected by Vite
   const apiKey = process.env.API_KEY;
-  if (!apiKey || apiKey.includes("YOUR_API_KEY")) {
-    throw new Error("API Key not found. Please check your Vercel Environment Variables.");
+  
+  // Check if key is missing or empty
+  if (!apiKey || apiKey.trim() === "" || apiKey.includes("YOUR_API_KEY")) {
+    throw new Error("API Key not found. Please add API_KEY to your Vercel Project Settings.");
   }
   return new GoogleGenAI({ apiKey });
 };
@@ -66,7 +69,8 @@ export const streamChatResponse = async (
   newMessageText: string,
   newMessageImage: string | null, // Base64
   model: string,
-  systemInstruction?: string
+  systemInstruction?: string,
+  generationConfig?: any
 ) => {
   
   const ai = getGenAIClient();
@@ -107,7 +111,8 @@ export const streamChatResponse = async (
       model,
       contents,
       config: {
-        systemInstruction
+        systemInstruction,
+        ...generationConfig
       }
     });
   } catch (error: any) {

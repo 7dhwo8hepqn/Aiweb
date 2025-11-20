@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Image as ImageIcon, X, Trash2, Bot, User, Loader2, Sparkles, FileText, Mic, StopCircle, RefreshCw, Copy, Check, ChevronDown, Terminal, Lightbulb, Code2, Plane, BookOpen, History, MessageSquare, Plus, Pencil, Menu } from 'lucide-react';
+import { Send, Image as ImageIcon, X, Trash2, Bot, User, Loader2, Sparkles, FileText, Mic, StopCircle, RefreshCw, Copy, Check, ChevronDown, Terminal, Lightbulb, Code2, Plane, BookOpen, History, MessageSquare, Plus, Pencil, Menu, BrainCircuit, Zap } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { streamChatResponse, fileToBase64 } from '../services/geminiService';
@@ -66,7 +66,8 @@ export const ChatInterface: React.FC = () => {
   
   const [config, setConfig] = useState<ChatConfig>({
     model: BotModel.FLASH,
-    systemInstruction: DEFAULT_SYSTEM_INSTRUCTION
+    systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
+    useThinking: false
   });
 
   // --- Refs ---
@@ -85,7 +86,8 @@ export const ChatInterface: React.FC = () => {
     const savedSessions = localStorage.getItem('gemini_chat_sessions');
     if (savedSessions) {
       try {
-        setSessions(JSON.parse(savedSessions));
+        const parsed = JSON.parse(savedSessions);
+        setSessions(parsed);
       } catch (e) {
         console.error("Failed to parse sessions", e);
       }
@@ -105,13 +107,13 @@ export const ChatInterface: React.FC = () => {
 
   // Update current session data when messages change
   useEffect(() => {
-    if (!currentSessionId || messages.length === 0) return;
+    if (!currentSessionId) return;
     
     setSessions(prev => prev.map(session => {
         if (session.id === currentSessionId) {
             // Generate a title from the first user message if it's "New Chat"
             let title = session.title;
-            if (title === "New Chat" && messages.length > 0) {
+            if ((title === "New Chat" || !title) && messages.length > 0) {
                 const firstUserMsg = messages.find(m => m.role === 'user');
                 if (firstUserMsg) {
                     title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
@@ -138,7 +140,6 @@ export const ChatInterface: React.FC = () => {
       }
       // Close sidebar on mobile when clicking outside
       if (window.innerWidth < 1024 && showHistory && sidebarRef.current && !sidebarRef.current.contains(event.target as Node)) {
-         // Only if we clicked outside the toggle button too (optional, but keeps logic simple)
          const toggleBtn = document.getElementById('history-toggle-btn');
          if (toggleBtn && !toggleBtn.contains(event.target as Node)) {
              setShowHistory(false);
@@ -170,7 +171,6 @@ export const ChatInterface: React.FC = () => {
     setSessions(prev => [newSession, ...prev]);
     setCurrentSessionId(newId);
     setMessages([]);
-    setShowHistory(false); // Close sidebar on mobile
     if (window.innerWidth < 1024) setShowHistory(false);
   };
 
@@ -276,12 +276,22 @@ export const ChatInterface: React.FC = () => {
     setIsStreaming(true);
 
     try {
+      let generationConfig: any = {};
+
+      // Enable thinking only for 2.5 series if config is enabled
+      if (config.useThinking && config.model.includes('gemini-2.5')) {
+        generationConfig = {
+            thinkingConfig: { thinkingBudget: 1024 } 
+        };
+      }
+
       const stream = await streamChatResponse(
         history,
         text,
         image || null,
         config.model,
-        config.systemInstruction
+        config.systemInstruction,
+        generationConfig
       );
 
       let fullText = "";
@@ -305,9 +315,22 @@ export const ChatInterface: React.FC = () => {
       ));
 
     } catch (error: any) {
+      const errorMessage = error.message || "Unknown error";
+      let displayError = "Sorry, I encountered an error.";
+      
+      if (errorMessage.includes("API Key")) {
+          displayError = "API Key missing. Please add API_KEY to Vercel Environment Variables.";
+      } else if (errorMessage.includes("404")) {
+          displayError = `Model ${config.model} not found or not available. Try switching models.`;
+      } else if (errorMessage.includes("429")) {
+          displayError = "Rate limit exceeded. Please try again later.";
+      } else {
+          displayError = `Error: ${errorMessage}`;
+      }
+
       setMessages(prev => prev.map(msg => 
         msg.id === aiMessageId 
-        ? { ...msg, text: "Sorry, I encountered an error. Please check your API Key.", isError: true, isStreaming: false } 
+        ? { ...msg, text: displayError, isError: true, isStreaming: false } 
         : msg
       ));
     } finally {
@@ -353,13 +376,20 @@ export const ChatInterface: React.FC = () => {
     const lastMessage = messages[messages.length - 1];
     if (lastMessage.role !== 'model') return;
 
+    // Remove the model's last response
     const newHistory = messages.slice(0, -1);
     setMessages(newHistory);
 
+    // Find the last user message to re-send
     const lastUserMessage = newHistory[newHistory.length - 1];
     if (!lastUserMessage || lastUserMessage.role !== 'user') return;
 
-    await processMessage(lastUserMessage.text, lastUserMessage.image, newHistory.slice(0, -1));
+    // Need to re-construct context. Ideally we re-send the previous user message text
+    // But processMessage takes (text, image, history).
+    // history should be everything BEFORE the last user message.
+    const historyForContext = newHistory.slice(0, -1);
+    
+    await processMessage(lastUserMessage.text, lastUserMessage.image, historyForContext);
   };
 
   const handleEditMessage = (index: number) => {
@@ -368,7 +398,8 @@ export const ChatInterface: React.FC = () => {
     if (msgToEdit.role !== 'user') return;
 
     setInputValue(msgToEdit.text); // Populate input
-    setMessages(prev => prev.slice(0, index)); // Remove this and subsequent messages
+    // Remove this message and everything after it
+    setMessages(prev => prev.slice(0, index));
     if (textareaRef.current) textareaRef.current.focus();
   };
 
@@ -396,84 +427,85 @@ export const ChatInterface: React.FC = () => {
       {/* Sidebar (History) */}
       <div 
         ref={sidebarRef}
-        className={`absolute md:relative z-30 h-full w-[280px] bg-slate-900 border-r border-slate-800 transform transition-transform duration-300 ease-in-out ${
-            showHistory ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:overflow-hidden'
-        } ${/* Hack to make sidebar visible on large screens if we want a toggle, but user wants "history button". 
-            Let's make it toggleable on ALL screens for cleaner UI */ ''} 
+        className={`absolute md:relative z-30 h-full w-[280px] bg-slate-900 border-r border-slate-800 transform transition-transform duration-300 ease-in-out flex flex-col
+            ${showHistory ? 'translate-x-0' : '-translate-x-full md:translate-x-0 md:w-0 md:border-none'} 
             ${showHistory ? 'shadow-2xl' : ''}
         `}
       >
-        <div className="flex flex-col h-full">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-                <h2 className="font-semibold text-slate-200 flex items-center gap-2">
-                    <History className="w-4 h-4 text-indigo-400" /> History
-                </h2>
-                <button 
-                    onClick={() => setShowHistory(false)} 
-                    className="md:hidden text-slate-400 hover:text-white"
-                >
-                    <X className="w-5 h-5" />
-                </button>
-            </div>
-            
-            <div className="p-3">
-                <button 
-                    onClick={createNewSession}
-                    className="w-full flex items-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors shadow-lg shadow-indigo-900/20"
-                >
-                    <Plus className="w-4 h-4" /> New Chat
-                </button>
-            </div>
+        <div className="p-4 border-b border-slate-800 flex items-center justify-between shrink-0">
+            <h2 className="font-semibold text-slate-200 flex items-center gap-2">
+                <History className="w-4 h-4 text-indigo-400" /> History
+            </h2>
+            <button 
+                onClick={() => setShowHistory(false)} 
+                className="md:hidden text-slate-400 hover:text-white"
+            >
+                <X className="w-5 h-5" />
+            </button>
+        </div>
+        
+        <div className="p-3 shrink-0">
+            <button 
+                onClick={() => { createNewSession(); if(window.innerWidth < 768) setShowHistory(false); }}
+                className="w-full flex items-center gap-2 px-4 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors shadow-lg shadow-indigo-900/20 font-medium"
+            >
+                <Plus className="w-4 h-4" /> New Chat
+            </button>
+        </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-1 scrollbar-thin">
-                {sessions.map(session => (
-                    <div 
-                        key={session.id}
-                        onClick={() => loadSession(session.id)}
-                        className={`group flex items-center justify-between px-3 py-3 rounded-lg cursor-pointer transition-all ${
-                            currentSessionId === session.id 
-                            ? 'bg-slate-800 text-white border border-slate-700' 
-                            : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
-                        }`}
-                    >
-                        <div className="flex items-center gap-3 overflow-hidden">
-                            <MessageSquare className="w-4 h-4 flex-shrink-0" />
-                            <span className="text-sm truncate">{session.title}</span>
-                        </div>
-                        <button
-                            onClick={(e) => deleteSession(e, session.id)}
-                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity"
-                        >
-                            <Trash2 className="w-3 h-3" />
-                        </button>
+        <div className="flex-1 overflow-y-auto p-3 space-y-1 scrollbar-thin">
+            {sessions.length === 0 && (
+                <div className="text-center text-slate-500 text-xs mt-10">No history yet</div>
+            )}
+            {sessions.map(session => (
+                <div 
+                    key={session.id}
+                    onClick={() => loadSession(session.id)}
+                    className={`group flex items-center justify-between px-3 py-3 rounded-lg cursor-pointer transition-all ${
+                        currentSessionId === session.id 
+                        ? 'bg-slate-800 text-white border border-slate-700 shadow-sm' 
+                        : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                    }`}
+                >
+                    <div className="flex items-center gap-3 overflow-hidden">
+                        <MessageSquare className="w-4 h-4 flex-shrink-0" />
+                        <span className="text-sm truncate">{session.title || "New Chat"}</span>
                     </div>
-                ))}
-            </div>
+                    <button
+                        onClick={(e) => deleteSession(e, session.id)}
+                        className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-opacity"
+                        title="Delete Chat"
+                    >
+                        <Trash2 className="w-3 h-3" />
+                    </button>
+                </div>
+            ))}
         </div>
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col h-full relative min-w-0">
+      <div className="flex-1 flex flex-col h-full relative min-w-0 bg-slate-950">
         
         {/* Header */}
-        <div className="h-16 flex items-center justify-between px-4 lg:px-6 bg-slate-900/80 border-b border-slate-800 backdrop-blur-md z-10">
+        <div className="h-16 flex items-center justify-between px-4 lg:px-6 bg-slate-900/80 border-b border-slate-800 backdrop-blur-md z-10 shrink-0">
             <div className="flex items-center gap-3">
                 <button 
                     id="history-toggle-btn"
                     onClick={() => setShowHistory(!showHistory)}
-                    className="p-2 -ml-2 text-slate-400 hover:bg-slate-800 rounded-lg transition-colors"
+                    className="p-2 -ml-2 text-slate-400 hover:bg-slate-800 hover:text-white rounded-lg transition-colors"
+                    title="Toggle History"
                 >
                     <Menu className="w-5 h-5" />
                 </button>
                 
-                <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                <div className="hidden sm:flex w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-600 to-purple-600 items-center justify-center shadow-lg shadow-indigo-500/20">
                     <Sparkles className="w-4 h-4 text-white" />
                 </div>
                 
                 <div className="relative" ref={modelDropdownRef}>
                     <button 
                         onClick={() => setShowModelSelect(!showModelSelect)}
-                        className="flex items-center gap-2 text-sm font-semibold text-white hover:bg-slate-800 px-3 py-1.5 rounded-lg transition-colors"
+                        className="flex items-center gap-2 text-sm font-semibold text-white hover:bg-slate-800 px-3 py-1.5 rounded-lg transition-colors border border-transparent hover:border-slate-700"
                     >
                         {config.model === BotModel.FLASH && 'Gemini 2.5 Flash'}
                         {config.model === BotModel.PRO && 'Gemini 2.5 Pro'}
@@ -483,8 +515,8 @@ export const ChatInterface: React.FC = () => {
 
                     {/* Model Dropdown */}
                     {showModelSelect && (
-                        <div className="absolute top-full left-0 mt-2 w-72 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100">
-                            <div className="px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider">Select Model</div>
+                        <div className="absolute top-full left-0 mt-2 w-72 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl py-1 z-50 animate-in fade-in zoom-in-95 duration-100 ring-1 ring-black/5">
+                            <div className="px-4 py-2 text-xs font-semibold text-slate-500 uppercase tracking-wider bg-slate-950/50">Select Model</div>
                             {[
                                 { id: BotModel.FLASH, name: 'Gemini 2.5 Flash', desc: 'Fastest & most versatile' },
                                 { id: BotModel.PRO, name: 'Gemini 2.5 Pro', desc: 'Best for complex reasoning' },
@@ -496,8 +528,8 @@ export const ChatInterface: React.FC = () => {
                                         setConfig({ ...config, model: m.id });
                                         setShowModelSelect(false);
                                     }}
-                                    className={`w-full text-left px-4 py-3 hover:bg-slate-700/50 transition-colors flex flex-col ${
-                                        config.model === m.id ? 'bg-indigo-500/10 border-l-2 border-indigo-500' : ''
+                                    className={`w-full text-left px-4 py-3 hover:bg-slate-800 transition-colors flex flex-col border-l-2 ${
+                                        config.model === m.id ? 'bg-indigo-500/5 border-indigo-500' : 'border-transparent'
                                     }`}
                                 >
                                     <span className={`text-sm font-medium ${config.model === m.id ? 'text-indigo-400' : 'text-slate-200'}`}>
@@ -506,9 +538,38 @@ export const ChatInterface: React.FC = () => {
                                     <span className="text-xs text-slate-500 mt-0.5">{m.desc}</span>
                                 </button>
                             ))}
+                            <div className="px-4 py-3 border-t border-slate-800 bg-slate-950/30 flex items-center justify-between group">
+                                <div className="flex items-center gap-2">
+                                    <BrainCircuit className={`w-4 h-4 ${config.useThinking ? 'text-amber-400' : 'text-slate-600'}`} />
+                                    <div className="flex flex-col">
+                                        <span className="text-xs font-medium text-slate-300">Thinking Mode</span>
+                                        <span className="text-[10px] text-slate-500">Available on Gemini 2.5 Flash</span>
+                                    </div>
+                                </div>
+                                <button 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setConfig(p => ({...p, useThinking: !p.useThinking}));
+                                    }}
+                                    className={`w-8 h-4 rounded-full relative transition-colors ${config.useThinking ? 'bg-indigo-500' : 'bg-slate-700'}`}
+                                >
+                                    <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${config.useThinking ? 'left-4.5' : 'left-0.5'}`} />
+                                </button>
+                            </div>
                         </div>
                     )}
                 </div>
+            </div>
+            
+            {/* Header Actions */}
+            <div className="flex items-center gap-2">
+                 <button 
+                    onClick={() => createNewSession()}
+                    className="p-2 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded-lg transition-colors sm:hidden"
+                    title="New Chat"
+                >
+                    <Plus className="w-5 h-5" />
+                </button>
             </div>
         </div>
 
@@ -516,19 +577,24 @@ export const ChatInterface: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-4 lg:p-8 scrollbar-thin">
             {messages.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center p-4 animate-in fade-in zoom-in-95 duration-500">
-                    <div className="w-24 h-24 bg-slate-800/50 rounded-full flex items-center justify-center mb-8 ring-1 ring-slate-700 shadow-2xl">
+                    <div className="w-24 h-24 bg-slate-800/50 rounded-full flex items-center justify-center mb-8 ring-1 ring-slate-700 shadow-2xl relative">
                         <Bot className="w-12 h-12 text-indigo-400" />
+                        {config.useThinking && (
+                             <div className="absolute -top-1 -right-1 bg-slate-900 rounded-full p-1.5 border border-slate-700">
+                                <BrainCircuit className="w-4 h-4 text-amber-400" />
+                             </div>
+                        )}
                     </div>
-                    <h2 className="text-2xl font-bold text-white mb-2">How can I help you today?</h2>
+                    <h2 className="text-2xl font-bold text-white mb-2 text-center">How can I help you today?</h2>
                     <p className="text-slate-400 mb-8 text-center max-w-md">
-                        I'm Gemini, a multimodal AI. I can process text, code, images, and files.
+                        I'm Gemini. I can process text, code, images, and files.
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-2xl">
                         {suggestions.map((s, i) => (
                             <button 
                                 key={i}
                                 onClick={() => handleSendMessage(s.label)}
-                                className="flex items-center gap-3 p-4 bg-slate-800/50 hover:bg-slate-800 border border-slate-700 hover:border-indigo-500/50 rounded-xl text-left text-sm text-slate-300 hover:text-white transition-all hover:-translate-y-0.5 group"
+                                className="flex items-center gap-3 p-4 bg-slate-900/50 hover:bg-slate-800 border border-slate-800 hover:border-indigo-500/50 rounded-xl text-left text-sm text-slate-300 hover:text-white transition-all hover:-translate-y-0.5 group"
                             >
                                 <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 group-hover:bg-indigo-500 group-hover:text-white transition-colors">
                                     {s.icon}
@@ -539,7 +605,7 @@ export const ChatInterface: React.FC = () => {
                     </div>
                 </div>
             ) : (
-                <div className="max-w-3xl mx-auto space-y-6">
+                <div className="max-w-3xl mx-auto space-y-8 pb-4">
                     {messages.map((msg, idx) => (
                         <div 
                             key={msg.id} 
@@ -551,7 +617,8 @@ export const ChatInterface: React.FC = () => {
                                 {msg.role === 'user' ? <User className="w-5 h-5 text-white" /> : <Sparkles className="w-5 h-5 text-indigo-400" />}
                             </div>
 
-                            <div className={`flex flex-col gap-2 max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                            <div className={`flex flex-col gap-2 max-w-[90%] lg:max-w-[85%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                                {/* Display User Image if attached */}
                                 {msg.image && (
                                     <img 
                                         src={`data:image/jpeg;base64,${msg.image}`} 
@@ -606,19 +673,19 @@ export const ChatInterface: React.FC = () => {
 
                                 {/* Message Actions */}
                                 {!msg.isStreaming && !msg.isError && (
-                                    <div className={`flex items-center gap-2 text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'pr-1' : 'pl-1'}`}>
+                                    <div className={`flex items-center gap-1 text-slate-500 opacity-0 group-hover:opacity-100 transition-opacity ${msg.role === 'user' ? 'pr-1' : 'pl-1'}`}>
                                         <button 
                                             onClick={() => handleCopyMessage(msg.text)}
-                                            className="p-1 hover:text-white transition-colors" 
-                                            title="Copy"
+                                            className="p-1.5 hover:text-white hover:bg-slate-800 rounded transition-colors" 
+                                            title="Copy text"
                                         >
                                             <Copy className="w-3.5 h-3.5" />
                                         </button>
                                         {msg.role === 'user' && (
                                             <button 
                                                 onClick={() => handleEditMessage(idx)}
-                                                className="p-1 hover:text-white transition-colors" 
-                                                title="Edit"
+                                                className="p-1.5 hover:text-white hover:bg-slate-800 rounded transition-colors" 
+                                                title="Edit message"
                                             >
                                                 <Pencil className="w-3.5 h-3.5" />
                                             </button>
@@ -626,8 +693,8 @@ export const ChatInterface: React.FC = () => {
                                         {msg.role === 'model' && idx === messages.length - 1 && (
                                             <button 
                                                 onClick={handleRegenerate}
-                                                className="p-1 hover:text-white transition-colors" 
-                                                title="Regenerate"
+                                                className="p-1.5 hover:text-white hover:bg-slate-800 rounded transition-colors" 
+                                                title="Regenerate response"
                                             >
                                                 <RefreshCw className="w-3.5 h-3.5" />
                                             </button>
@@ -643,7 +710,7 @@ export const ChatInterface: React.FC = () => {
         </div>
 
         {/* Input Area */}
-        <div className="p-4 lg:p-6 bg-slate-900 border-t border-slate-800">
+        <div className="p-4 lg:p-6 bg-slate-900 border-t border-slate-800 shrink-0">
             <div className="max-w-3xl mx-auto">
                 {(imagePreview || selectedTextFile) && (
                     <div className="mb-4 flex flex-wrap gap-2">
@@ -726,6 +793,7 @@ export const ChatInterface: React.FC = () => {
                             ? 'text-red-400 bg-red-500/10 ring-1 ring-red-500/50 animate-pulse' 
                             : 'text-slate-400 hover:text-white hover:bg-slate-700'
                         }`}
+                        title="Voice Input"
                     >
                         {isListening ? <StopCircle className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
                     </button>

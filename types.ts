@@ -19,10 +19,11 @@ export enum BotModel {
   FLASH = 'gemini-2.5-flash',
   PRO = 'gemini-3-pro-preview',
   LITE = 'gemini-flash-lite-latest',
-  FLASH_THINKING = 'gemini-2.5-flash-thinking', // Experimental identifier for UI logic
+  FLASH_THINKING = 'gemini-2.5-flash-thinking', // UI reference for Flash + Thinking Config
 }
 
 export interface ChatConfig {
   model: string;
   systemInstruction: string;
+  useThinking?: boolean; // New config for enabling thinking budget
 }
